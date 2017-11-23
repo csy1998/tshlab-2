@@ -101,7 +101,7 @@ void app_error(char *msg);
 ssize_t sio_puts(char s[]);
 ssize_t sio_putl(long v);
 void sio_error(char s[]);
-
+volatile sig_atomic_t pid_test;
 typedef void handler_t(int);
 handler_t *Signal(int signum, handler_t *handler);
 
@@ -120,7 +120,7 @@ main(int argc, char **argv)
      * on the pipe connected to stdout) */
     dup2(1, 2);
 
-    /* Parse the command line */
+    /* Parse the command line ./tsh -?*/
     while ((c = getopt(argc, argv, "hvp")) != EOF) {
         switch (c) {
         case 'h':             /* print help message */
@@ -143,9 +143,8 @@ main(int argc, char **argv)
     Signal(SIGINT,  sigint_handler);   /* ctrl-c */
     Signal(SIGTSTP, sigtstp_handler);  /* ctrl-z */
     Signal(SIGCHLD, sigchld_handler);  /* Terminated or stopped child */
-    Signal(SIGTTIN, SIG_IGN);
-    Signal(SIGTTOU, SIG_IGN);
-
+    Signal(SIGTTIN, SIG_DFL);
+    Signal(SIGTTOU, SIG_DFL);
     /* This one provides a clean way to kill the shell */
     Signal(SIGQUIT, sigquit_handler); 
 
@@ -173,8 +172,15 @@ main(int argc, char **argv)
         cmdline[strlen(cmdline)-1] = '\0';
         
         /* Evaluate the command line */
+	pid_test=0;
         eval(cmdline);
-        
+	/*synchronizing with the shell, finishing this term before the next shell prompt*/
+	sigset_t mask_one;
+	sigfillset(&mask_one);
+	sigdelset(&mask_one,SIGCHLD);
+        while(!pid_test){
+		sigsuspend(&mask_one);
+	}
         fflush(stdout);
         fflush(stdout);
     } 
@@ -198,23 +204,34 @@ eval(char *cmdline)
 {
     int bg;              /* should the job run in bg or fg? */
     struct cmdline_tokens tok;
-pid_t pid;
+    sigset_t mask_all,pre_all;
+    pid_t pid;
     /* Parse command line */
     bg = parseline(cmdline, &tok); 
-
+    sigfillset(&mask_all);
     if (bg == -1) /* parsing error */
         return;
     if (tok.argv[0] == NULL) /* ignore empty lines */
         return;
-    if(tok.builtins==BUILTIN_QUIT){
-	exit(0);
- 	fflush(stdout);
-	}
-	else if(tok.builtins==BUILTIN_NONE){
-		if((pid=fork())==0){
-			execve(tok.argv[0],tok.argv,environ);
-			}
-		     }
+    if(tok.builtins==BUILTIN_QUIT){ 
+	    fflush(stdout);
+	   _exit(0);
+    }
+    else if(tok.builtins==BUILTIN_NONE){
+	    /*Don't need to wait*/
+	    if(bg){
+		    pid_test=-1;
+	    }
+	    sigprocmask(SIG_BLOCK,&mask_all,&pre_all);
+	    if((pid=fork())==0){	    
+		    setpgid(0,0);
+		    sigprocmask(SIG_SETMASK,&pre_all,NULL);
+		   // printf("%s:for test\n",tok.argv[0]);
+		    execve(tok.argv[0],tok.argv,environ);
+	    
+	    }
+	    sigprocmask(SIG_SETMASK,&pre_all,NULL);
+    }
     return;
 }
 
@@ -381,6 +398,10 @@ parseline(const char *cmdline, struct cmdline_tokens *tok)
 void 
 sigchld_handler(int sig) 
 {
+	int olderrno=errno;
+	pid_test=waitpid(-1,NULL,0);
+//	printf("%d\n",pid_test);
+	errno=olderrno;
     return;
 }
 
